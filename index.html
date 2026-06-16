@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Smart Vehicle Finder</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+
+    <style>
+        body {
+            font-family: 'Pretendard', 'Malgun Gothic', sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #0f2027;
+            color: #f8fafc;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 100vh;
+            overflow: hidden;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        header {
+            width: 100%;
+            padding: 15px 0 5px 0;
+            text-align: center;
+            background: linear-gradient(to bottom, rgba(0,0,0,1), rgba(0,0,0,0));
+            z-index: 10;
+        }
+
+        h1 {
+            font-size: 1.4rem;
+            margin: 0;
+            color: #00f2fe;
+            text-shadow: 0 0 8px rgba(0, 242, 254, 0.6);
+        }
+
+        p {
+            font-size: 0.8rem;
+            color: #e2e8f0;
+            margin: 3px 0 0 0;
+            letter-spacing: 0.5px;
+        }
+
+        #status {
+            font-weight: bold;
+            background: rgba(16, 185, 129, 0.25);
+            color: #10b981;
+            padding: 6px 16px;
+            border-radius: 30px;
+            font-size: 12px;
+            border: 1px solid rgba(16, 185, 129, 0.4);
+            margin: 8px auto;
+            backdrop-filter: blur(8px);
+            display: inline-block;
+            transition: all 0.3s ease;
+        }
+
+        #canvas-container {
+            position: relative;
+            width: 92%;
+            max-width: 450px;
+            aspect-ratio: 3 / 4;
+            background: #071119;
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+            border: 3px solid #ff7e5f;
+        }
+
+        video { display: none; }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover; 
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>🚗 Smart Vehicle Finder</h1>
+        <p>실시간 차량 및 트럭 객체 탐지 시스템</p>
+        <div id="status">⏳ 추론 엔진 로드 중...</div>
+    </header>
+
+    <div id="canvas-container">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="display_canvas"></canvas>
+    </div>
+
+<script>
+const video = document.getElementById('webcam');
+const canvas = document.getElementById('display_canvas');
+const ctx = canvas.getContext('2d');
+const statusDiv = document.getElementById('status');
+
+let session;
+const modelWidth = 416;
+const modelHeight = 416;
+
+// 🏷️ 요청하신 12개 클래스 라벨 네임 적용
+const labels = [
+    'big bus', 'big truck', 'bus-l-', 'bus-s-', 'car', 
+    'mid truck', 'small bus', 'small truck', 'truck-l-', 
+    'truck-m-', 'truck-s-', 'truck-xl-'
+];
+
+// 🎨 클래스별 고유 색상 지정을 위한 컬러 팔레트 (HUE 기반 자동 생성용)
+function getClassColor(classId) {
+    const angle = (classId * (360 / labels.length)) % 360;
+    return `hsl(${angle}, 90%, 60%)`;
+}
+
+async function startApp() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 640 },
+                height: { ideal: 480 }
+            },
+            audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        statusDiv.innerText = "⚡ 인공지능 엔진 최적화 중...";
+        statusDiv.style.background = "rgba(0, 242, 254, 0.15)";
+        statusDiv.style.color = "#00f2fe";
+        statusDiv.style.borderColor = "rgba(0, 242, 254, 0.4)";
+
+        session = await ort.InferenceSession.create('./best.onnx', { executionProviders: ['wasm'] });
+
+        statusDiv.innerText = "📱 차량 탐지 가동 중";
+        statusDiv.style.background = "rgba(255, 126, 95, 0.2)";
+        statusDiv.style.color = "#ff7e5f";
+        statusDiv.style.borderColor = "rgba(255, 126, 95, 0.5)";
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        requestAnimationFrame(processFrame);
+    } catch (err) {
+        statusDiv.innerText = "❌ 에러: 카메라 권한 부족 또는 best.onnx 없음";
+        statusDiv.style.background = "rgba(239, 68, 68, 0.2)";
+        statusDiv.style.color = "#ef4444";
+        console.error(err);
+    }
+}
+
+async function processFrame() {
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        const inputTensor = preprocess(video, modelWidth, modelHeight);
+
+        if (inputTensor) {
+            try {
+                const outputs = await session.run({ images: inputTensor });
+                const outputName = Object.keys(outputs)[0];
+                const output = outputs[outputName];
+
+                postprocess(output.data, output.dims);
+            } catch (e) {
+                console.error("추론 중 오류 발생:", e);
+            }
+        }
+    }
+    requestAnimationFrame(processFrame);
+}
+
+function preprocess(img, width, height) {
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = width;
+    tempCanvas.height = height;
+    const tempCtx = tempCanvas.getContext('2d');
+
+    tempCtx.drawImage(img, 0, 0, width, height);
+
+    const imgData = tempCtx.getImageData(0, 0, width, height);
+    const data = imgData.data;
+
+    const float32Data = new Float32Array(width * height * 3);
+    
+    for (let i = 0; i < width * height; i++) {
+        float32Data[i] = data[i * 4] / 255.0;                  
+        float32Data[width * height + i] = data[i * 4 + 1] / 255.0;  
+        float32Data[width * height * 2 + i] = data[i * 4 + 2] / 255.0;  
+    }
+
+    return new ort.Tensor('float32', float32Data, [1, 3, width, height]);
+}
+
+function postprocess(data, dims) {
+    // dims[1]은 이제 4(좌표) + 12(클래스 수) = 16 이 됩니다.
+    const numAttributes = dims[1]; 
+    const numBoxes = dims[2];      
+
+    let candidates = [];
+    const scoreThreshold = 0.40;   
+
+    for (let i = 0; i < numBoxes; i++) {
+        let maxScore = 0;
+        let classId = -1;
+
+        // index 4번부터 끝(numAttributes)까지 돌며 최대 확률인 클래스를 찾습니다.
+        for (let c = 4; c < numAttributes; c++) {
+            const score = data[c * numBoxes + i];
+            if (score > maxScore) {
+                maxScore = score;
+                classId = c - 4;
+            }
+        }
+
+        if (maxScore > scoreThreshold) {
+            const cx = data[0 * numBoxes + i];
+            const cy = data[1 * numBoxes + i];
+            const w = data[2 * numBoxes + i];
+            const h = data[3 * numBoxes + i];
+
+            const x = (cx - w / 2) / modelWidth * canvas.width;
+            const y = (cy - h / 2) / modelHeight * canvas.height;
+            const boxW = w / modelWidth * canvas.width;
+            const boxH = h / modelHeight * canvas.height;
+
+            candidates.push({ x, y, w: boxW, h: boxH, score: maxScore, classId });
+        }
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    let selectedObjects = [];
+
+    while (candidates.length > 0) {
+        let box = candidates.shift();
+        selectedObjects.push(box);
+
+        candidates = candidates.filter(item => {
+            if (item.classId !== box.classId) return true;
+
+            const interX1 = Math.max(box.x, item.x);
+            const interY1 = Math.max(box.y, item.y);
+            const interX2 = Math.min(box.x + box.w, item.x + item.w);
+            const interY2 = Math.min(box.y + box.h, item.y + item.h);
+
+            if (interX2 > interX1 && interY2 > interY1) {
+                const interArea = (interX2 - interX1) * (interY2 - interY1);
+                const boxArea = box.w * box.h;
+                const itemArea = item.w * item.h;
+                const iou = interArea / (boxArea + itemArea - interArea);
+                return iou < 0.45; 
+            }
+            return true;
+        });
+    }
+
+    selectedObjects.forEach(obj => {
+        // 클래스마다 다른 색상을 동적으로 할당하여 가시성을 높였습니다.
+        const themeColor = getClassColor(obj.classId);
+
+        ctx.strokeStyle = themeColor;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+
+        const labelName = labels[obj.classId];
+        const text = `${labelName} ${Math.round(obj.score * 100)}%`;
+        
+        ctx.font = "bold 12px sans-serif";
+        const textWidth = ctx.measureText(text).width;
+        
+        const labelY = obj.y - 20 < 0 ? 0 : obj.y - 20;
+        
+        ctx.fillStyle = themeColor;
+        ctx.fillRect(obj.x - 1, labelY, textWidth + 10, 20);
+
+        // 글자색은 가독성을 위해 흰색 또는 어두운 청록색 계열로 지정
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(text, obj.x + 4, labelY + 14);
+    });
+}
+
+window.onload = startApp;
+</script>
+</body>
+</html>
